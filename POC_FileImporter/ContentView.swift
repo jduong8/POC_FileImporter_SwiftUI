@@ -8,20 +8,23 @@
 import SwiftUI
 import PDFKit
 
-/// ContentView qui gère l'ajout, l'affichage et la suppression de documents PDF.
 struct ContentView: View {
+    @State private var pdfDocuments = [PDFDocumentInfo]()
     @State private var showFileImporter = false
     @State private var showRenameAlert = false
-    @State private var pdfDocuments = [(pdf: PDFDocument, name: String)]()
     @State private var pendingPDFDocument: PDFDocument?
     @State private var pendingPDFName: String = ""
     @State private var originalPDFName: String = ""
 
+    init() {
+        loadSavedPDFs()
+    }
+
     var body: some View {
         NavigationView {
             List {
-                ForEach(pdfDocuments, id: \.name) { pdfInfo in
-                    NavigationLink(destination: PDFViewerView(document: pdfInfo.pdf)) {
+                ForEach(pdfDocuments, id: \.url) { pdfInfo in
+                    NavigationLink(destination: PDFViewerView(document: PDFDocument(url: pdfInfo.url))) {
                         Text(pdfInfo.name)
                     }
                 }
@@ -30,7 +33,7 @@ struct ContentView: View {
             .navigationTitle("PDF Files")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    EditButton()  // Bouton pour activer le mode d'édition de la liste.
+                    EditButton()
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: {
@@ -61,28 +64,10 @@ struct ContentView: View {
         }
     }
 
-    /// Ajoute le PDF à la liste de documents avec le nom spécifié.
-    func addPDFToDocumentsList(using name: String) {
-        if let pdfDocument = pendingPDFDocument {
-            pdfDocuments.append((pdf: pdfDocument, name: name))
-        }
-        resetPendingData()
-    }
-
-    /// Gère le résultat de l'importation de fichiers.
     func handleFileImportResult(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            processSelectedFiles(urls)
-        case .failure(let error):
-            print("Cannot load PDF: \(error)")
-        }
-    }
-
-    /// Traite les fichiers sélectionnés pour préparation à l'ajout.
-    func processSelectedFiles(_ urls: [URL]) {
-        urls.forEach { url in
-            guard url.startAccessingSecurityScopedResource() else { return }
+            guard let url = urls.first, url.startAccessingSecurityScopedResource() else { return }
             defer { url.stopAccessingSecurityScopedResource() }
             
             if let pdfDocument = PDFDocument(url: url) {
@@ -91,15 +76,66 @@ struct ContentView: View {
                 originalPDFName = url.deletingPathExtension().lastPathComponent
                 showRenameAlert = true
             }
+        case .failure(let error):
+            print("Cannot load PDF: \(error)")
+        }
+    }
+    /// Mise à jour de la méthode de sauvegarde des références de fichiers
+    func updateUserDefaults(with pdfInfo: PDFDocumentInfo) {
+        var savedPDFs = UserDefaults.standard.array(forKey: "savedPDFs") as? [String] ?? []
+        savedPDFs.append(pdfInfo.url.path)
+        UserDefaults.standard.set(savedPDFs, forKey: "savedPDFs")
+        print("Updated UserDefaults with: \(savedPDFs)")
+    }
+
+
+    func addPDFToDocumentsList(using name: String) {
+        if let pdfDocument = pendingPDFDocument {
+            let pdfInfo = PDFDocumentInfo(name: name, url: storePDFFileLocally(pdfDocument: pdfDocument))
+            pdfDocuments.append(pdfInfo)
+            updateUserDefaults(with: pdfInfo) // Mettre à jour UserDefaults après l'ajout d'un nouveau PDF
+            resetPendingData()
         }
     }
 
-    /// Supprime les éléments sélectionnés de la liste de documents.
+    func storePDFFileLocally(pdfDocument: PDFDocument) -> URL {
+        let fileManager = FileManager.default
+        let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let fileName = "\(UUID().uuidString).pdf"
+        let destinationPath = documentsDirectory.appendingPathComponent(fileName)
+        
+        if pdfDocument.write(to: destinationPath) {
+            print("PDF saved successfully at \(destinationPath)")
+        } else {
+            print("Failed to save PDF")
+        }
+        return destinationPath
+    }
+
+    func loadSavedPDFs() {
+        let fileManager = FileManager.default
+        let savedPDFs = UserDefaults.standard.array(forKey: "savedPDFs") as? [String] ?? []
+        print("Loading saved PDF paths: \(savedPDFs)")
+
+        pdfDocuments = savedPDFs.compactMap { path in
+            let url = URL(fileURLWithPath: path)
+            guard fileManager.fileExists(atPath: url.path) else {
+                print("File does not exist: \(url.path)")
+                return nil
+            }
+            return PDFDocumentInfo(name: url.deletingPathExtension().lastPathComponent, url: url)
+        }
+    }
+
+
     func deletePDF(at offsets: IndexSet) {
+        offsets.forEach { index in
+            let pdfInfo = pdfDocuments[index]
+            try? FileManager.default.removeItem(at: pdfInfo.url)
+        }
         pdfDocuments.remove(atOffsets: offsets)
     }
 
-    /// Réinitialise les données temporaires.
     func resetPendingData() {
         pendingPDFDocument = nil
         pendingPDFName = ""
@@ -107,27 +143,29 @@ struct ContentView: View {
     }
 }
 
-/// Vue pour visualiser un document PDF spécifique.
+struct PDFDocumentInfo {
+    var name: String
+    var url: URL
+}
+
 struct PDFViewerView: View {
-    var document: PDFDocument
+    var document: PDFDocument?
     
     var body: some View {
         PDFKitView(document: document)
     }
 }
 
-/// Vue pour encapsuler PDFView de PDFKit, utilisé pour afficher le contenu d'un PDF.
 struct PDFKitView: View {
-    var document: PDFDocument
+    var document: PDFDocument?
     
     var body: some View {
         PDFViewRepresentable(document: document)
     }
 }
 
-/// UIViewRepresentable pour intégrer PDFView de PDFKit dans SwiftUI.
 struct PDFViewRepresentable: UIViewRepresentable {
-    let document: PDFDocument
+    let document: PDFDocument?
     
     func makeUIView(context: Context) -> PDFView {
         let pdfView = PDFView()
@@ -139,7 +177,6 @@ struct PDFViewRepresentable: UIViewRepresentable {
     func updateUIView(_ uiView: PDFView, context: Context) {}
 }
 
-/// Previews pour ContentView.
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
         ContentView()
